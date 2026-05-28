@@ -13,6 +13,10 @@ from utils.log_util import create_workdir, set_seed
 from itertools import islice
 from tqdm import tqdm
 
+
+MODEL_ROOT = Path("/home/luke/UnsafeDistribution/modules/MinorityPrompt/models")
+LIGHTNING_CHECKPOINT_DIR = MODEL_ROOT / "checkpoints" / "sdxl-lightning"
+
 def chunk(it, size):
     it = iter(it)
     return iter(lambda: tuple(islice(it, size)), ())
@@ -133,12 +137,12 @@ def main():
                                     solver_config=solver_config,
                                     device=args.device)
         else:
-            light_model_ckpt = f"ckpt/sdxl_lightning_{args.NFE}step_unet.safetensors"
+            light_model_ckpt = LIGHTNING_CHECKPOINT_DIR / f"sdxl_lightning_{args.NFE}step_unet.safetensors"
             print(f"Using light model checkpoint: {light_model_ckpt}")
             solver = get_solver_sdxl(args.method,
                                     solver_config=solver_config,
                                     device=args.device,
-                                    light_model_ckpt=light_model_ckpt)
+                                    light_model_ckpt=str(light_model_ckpt))
 
         img_count = args.resume_from
         for i, text in enumerate(tqdm(text_list, desc='Batch')):

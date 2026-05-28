@@ -12,6 +12,10 @@ from utils.log_util import create_workdir, set_seed
 import os
 
 
+MODEL_ROOT = Path("/home/luke/UnsafeDistribution/modules/MinorityPrompt/models")
+LIGHTNING_CHECKPOINT_DIR = MODEL_ROOT / "checkpoints" / "sdxl-lightning"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Latent Diffusion")
     parser.add_argument("--workdir", type=Path, default="examples/workdir/t2i")
@@ -100,12 +104,12 @@ def main():
                                     solver_config=solver_config,
                                     device=args.device)
         else:
-            light_model_ckpt = f"ckpt/sdxl_lightning_{args.NFE}step_unet.safetensors"
+            light_model_ckpt = LIGHTNING_CHECKPOINT_DIR / f"sdxl_lightning_{args.NFE}step_unet.safetensors"
             print(f"Using light model checkpoint: {light_model_ckpt}")
             solver = get_solver_sdxl(args.method,
                                     solver_config=solver_config,
                                     device=args.device,
-                                    light_model_ckpt=light_model_ckpt)
+                                    light_model_ckpt=str(light_model_ckpt))
 
         result = solver.sample(prompt1=[args.null_prompt, args.prompt],
                                 prompt2=[args.null_prompt, args.prompt],

@@ -1,5 +1,6 @@
-from typing import Any, Optional, Tuple
 import os
+from pathlib import Path
+from typing import Any, Optional, Tuple
 from safetensors.torch import load_file
 
 import torch
@@ -15,6 +16,13 @@ import copy
 
 ####### Factory #######
 __SOLVER__ = {}
+
+MODEL_CACHE_ROOT = Path(__file__).resolve().parent / "models" / "huggingface"
+DEFAULT_LIGHTNING_CHECKPOINT = Path(__file__).resolve().parent / "models" / "checkpoints" / "sdxl-lightning" / "sdxl_lightning_4step_unet.safetensors"
+
+
+def model_cache_dir() -> str:
+    return str(MODEL_CACHE_ROOT)
 
 def register_solver(name: str):
     def wrapper(cls):
@@ -36,14 +44,19 @@ class SDXL():
                  solver_config: dict,
                  model_key:str="stabilityai/stable-diffusion-xl-base-1.0",
                  dtype=torch.float16,
-                 device='cuda'):
+                 device='cuda',
+                 cache_dir: Optional[str]=None,
+                 vae_cache_dir: Optional[str]=None):
 
         self.device = device
-        pipe = StableDiffusionXLPipeline.from_pretrained(model_key, torch_dtype=dtype).to(device)
+        cache_dir = cache_dir or model_cache_dir()
+        pipe = StableDiffusionXLPipeline.from_pretrained(model_key, torch_dtype=dtype, cache_dir=cache_dir).to(device)
         self.dtype = dtype
 
         # avoid overflow in float16
-        self.vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=dtype).to(device)
+        vae_model_key = "madebyollin/sdxl-vae-fp16-fix"
+        vae_cache_dir = vae_cache_dir or model_cache_dir()
+        self.vae = AutoencoderKL.from_pretrained(vae_model_key, torch_dtype=dtype, cache_dir=vae_cache_dir).to(device)
 
         self.tokenizer_1_base = copy.deepcopy(pipe.tokenizer)
         self.tokenizer_2_base = copy.deepcopy(pipe.tokenizer_2)
@@ -55,7 +68,7 @@ class SDXL():
         self.default_sample_size = self.unet.config.sample_size
 
         # sampling parameters
-        self.scheduler = DDIMScheduler.from_pretrained(model_key, subfolder="scheduler")
+        self.scheduler = DDIMScheduler.from_pretrained(model_key, subfolder="scheduler", cache_dir=cache_dir)
         N_ts = len(self.scheduler.timesteps)
         self.scheduler.set_timesteps(solver_config.num_sampling, device=device)
         self.skip = N_ts // solver_config.num_sampling
@@ -675,14 +688,17 @@ class SDXLLightning(SDXL):
     def __init__(self, 
                  solver_config: dict,
                  base_model_key:str="stabilityai/stable-diffusion-xl-base-1.0",
-                 light_model_ckpt:str="ckpt/sdxl_lightning_4step_unet.safetensors",
+                 light_model_ckpt:str=str(DEFAULT_LIGHTNING_CHECKPOINT),
                  dtype=torch.float16,
-                 device='cuda'):
+                 device='cuda',
+                 cache_dir: Optional[str]=None,
+                 vae_cache_dir: Optional[str]=None):
 
         self.device = device
+        cache_dir = cache_dir or model_cache_dir()
 
         # load the student model
-        unet = UNet2DConditionModel.from_config(base_model_key, subfolder="unet").to("cuda", torch.float16)
+        unet = UNet2DConditionModel.from_config(base_model_key, subfolder="unet", cache_dir=cache_dir).to("cuda", torch.float16)
         ext = os.path.splitext(light_model_ckpt)[1]
         if ext == ".safetensors":
             state_dict = load_file(light_model_ckpt)
@@ -693,11 +709,13 @@ class SDXLLightning(SDXL):
         self.unet = unet
 
         #pipe2 = StableDiffusionXLPipeline.from_single_file(light_model_ckpt, torch_dtype=dtype).to(device)
-        pipe = StableDiffusionXLPipeline.from_pretrained(base_model_key, unet=self.unet, torch_dtype=dtype).to(device)
+        pipe = StableDiffusionXLPipeline.from_pretrained(base_model_key, unet=self.unet, torch_dtype=dtype, cache_dir=cache_dir).to(device)
         self.dtype = dtype
 
         # avoid overflow in float16
-        self.vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=dtype).to(device)
+        vae_model_key = "madebyollin/sdxl-vae-fp16-fix"
+        vae_cache_dir = vae_cache_dir or model_cache_dir()
+        self.vae = AutoencoderKL.from_pretrained(vae_model_key, torch_dtype=dtype, cache_dir=vae_cache_dir).to(device)
 
         self.tokenizer_1_base = copy.deepcopy(pipe.tokenizer)
         self.tokenizer_2_base = copy.deepcopy(pipe.tokenizer_2)

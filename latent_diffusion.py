@@ -3,6 +3,7 @@ This module includes LDM-based inverse problem solvers.
 Forward operators follow DPS and DDRM/DDNM.
 """
 
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 import torch
@@ -14,6 +15,12 @@ import copy
 
 ####### Factory #######
 __SOLVER__ = {}
+
+MODEL_CACHE_ROOT = Path(__file__).resolve().parent / "models" / "huggingface"
+
+
+def model_cache_dir() -> str:
+    return str(MODEL_CACHE_ROOT)
 
 def register_solver(name: str):
     def wrapper(cls):
@@ -40,7 +47,8 @@ class StableDiffusion():
         self.device = device
 
         self.dtype = kwargs.get("pipe_dtype", torch.float16)
-        pipe = StableDiffusionPipeline.from_pretrained(model_key, torch_dtype=self.dtype).to(device)
+        cache_dir = kwargs.get("cache_dir", model_cache_dir())
+        pipe = StableDiffusionPipeline.from_pretrained(model_key, torch_dtype=self.dtype, cache_dir=cache_dir).to(device)
         self.vae = pipe.vae
         self.tokenizer = pipe.tokenizer
         self.text_encoder = pipe.text_encoder
@@ -49,7 +57,7 @@ class StableDiffusion():
         self.tokenizer_base = copy.deepcopy(pipe.tokenizer)
         self.text_encoder_base = copy.deepcopy(pipe.text_encoder)
 
-        self.scheduler = DDIMScheduler.from_pretrained(model_key, subfolder="scheduler")
+        self.scheduler = DDIMScheduler.from_pretrained(model_key, subfolder="scheduler", cache_dir=cache_dir)
         total_timesteps = len(self.scheduler.timesteps)
         self.scheduler.set_timesteps(solver_config.num_sampling, device=device)
         self.skip = total_timesteps // solver_config.num_sampling

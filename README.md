@@ -14,7 +14,10 @@ cd MinorityPrompt
 conda env create -f environment.yaml
 ```
 
-Second, download [sdxl_lightning_4step_unet.safetensors](https://huggingface.co/ByteDance/SDXL-Lightning/tree/main) in ```ckpt```.
+Second, model assets are kept under ```models/```:
+
+- Hugging Face models: downloaded automatically by Diffusers into ```models/huggingface/``` using Hugging Face's cache naming, e.g. ```models--stabilityai--stable-diffusion-xl-base-1.0```.
+- SDXL-Lightning checkpoints: download [sdxl_lightning_4step_unet.safetensors](https://huggingface.co/ByteDance/SDXL-Lightning/tree/main) into ```models/checkpoints/sdxl-lightning/```.
 
 
 ## Examples
