@@ -1,2 +1,4 @@
 models/huggingface/
 models/checkpoints/
+__pycache__/
+*.pyc
