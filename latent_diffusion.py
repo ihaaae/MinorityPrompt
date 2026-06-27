@@ -421,8 +421,12 @@ class StableDiffusion():
         placeholder_token_ids = tokenizer.convert_tokens_to_ids(placeholder_tokens)
         print("Placeholder token ids: ", placeholder_token_ids)
 
-        # Resize the token embeddings as we are adding new special tokens to the tokenizer
-        text_enc.resize_token_embeddings(len(tokenizer))
+        # Resize the token embeddings as we are adding new special tokens to the tokenizer.
+        # Newer transformers defaults to mean/covariance initialization for added
+        # tokens, which calls a CPU eigensolver that does not support fp16. The
+        # MinorityPrompt code immediately overwrites placeholder embeddings below,
+        # so keep the older random-initialization behavior.
+        text_enc.resize_token_embeddings(len(tokenizer), mean_resizing=False)
         
         if init_type == 'word':
             if not init_rand_vocab:
