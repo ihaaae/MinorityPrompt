@@ -175,7 +175,11 @@ class SD3:
             )
 
         placeholder_token_ids = tokenizer.convert_tokens_to_ids(placeholder_tokens)
-        text_enc.resize_token_embeddings(len(tokenizer))
+        # Newer transformers defaults to mean/covariance initialization for
+        # added tokens. MinorityPrompt overwrites placeholder embeddings below,
+        # so keep the older random-initialization path and avoid dtype-specific
+        # eigensolver failures.
+        text_enc.resize_token_embeddings(len(tokenizer), mean_resizing=False)
 
         token_ids = tokenizer.encode(init_word, add_special_tokens=False)
         if len(token_ids) > 1:
