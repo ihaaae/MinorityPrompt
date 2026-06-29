@@ -167,19 +167,27 @@ class SD3:
         for i in range(1, num_opt_tokens):
             placeholder_tokens.append(f"{placeholder_symbol}_{i}")
 
-        num_added_tokens = tokenizer.add_tokens(placeholder_tokens)
-        if num_added_tokens != num_opt_tokens:
+        existing_tokens = [token for token in placeholder_tokens if token in tokenizer.get_vocab()]
+        if existing_tokens and len(existing_tokens) != num_opt_tokens:
             raise ValueError(
-                f"The tokenizer already contains the token {placeholder_string}. Please pass a different"
-                " `placeholder_token` that is not already in the tokenizer."
+                "Some, but not all, SD3 prompt-optimization placeholder tokens already exist: "
+                f"{existing_tokens}. Please use a different placeholder token group."
+            )
+
+        num_added_tokens = 0 if existing_tokens else tokenizer.add_tokens(placeholder_tokens)
+        if not existing_tokens and num_added_tokens != num_opt_tokens:
+            raise ValueError(
+                f"The tokenizer could not add all placeholder tokens for {placeholder_string}. "
+                "Please pass a different `placeholder_token` group."
             )
 
         placeholder_token_ids = tokenizer.convert_tokens_to_ids(placeholder_tokens)
-        # Newer transformers defaults to mean/covariance initialization for
-        # added tokens. MinorityPrompt overwrites placeholder embeddings below,
-        # so keep the older random-initialization path and avoid dtype-specific
-        # eigensolver failures.
-        text_enc.resize_token_embeddings(len(tokenizer), mean_resizing=False)
+        if not existing_tokens:
+            # Newer transformers defaults to mean/covariance initialization for
+            # added tokens. MinorityPrompt overwrites placeholder embeddings below,
+            # so keep the older random-initialization path and avoid dtype-specific
+            # eigensolver failures.
+            text_enc.resize_token_embeddings(len(tokenizer), mean_resizing=False)
 
         token_ids = tokenizer.encode(init_word, add_special_tokens=False)
         if len(token_ids) > 1:
