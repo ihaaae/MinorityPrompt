@@ -73,6 +73,12 @@ class SD3:
         self.scheduler = self.pipe.scheduler
         self.tokenizer = self.pipe.tokenizer
         self.text_encoder = self.pipe.text_encoder
+        # Optimize placeholders in FP32, and keep both CLIP encoders in FP32 for
+        # every sample so precision does not depend on whether popt ran before.
+        self.text_encoder.to(torch.float32)
+        self.pipe.text_encoder_2.to(torch.float32)
+        self.clip_pairs = [(self.tokenizer, self.text_encoder),
+                           (self.pipe.tokenizer_2, self.pipe.text_encoder_2)]
 
         self.vae_scale_factor = self.pipe.vae_scale_factor
         self.default_sample_size = self.pipe.default_sample_size
@@ -110,11 +116,13 @@ class SD3:
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self.sample(*args, **kwargs)
 
-    def encode_prompt(self, prompt, negative_prompt=""):
+    def encode_prompt(self, prompt, negative_prompt="", prompt_3=None):
+        # prompt_3 lets T5 see the base prompt while both CLIP encoders see the
+        # placeholder; T5 has no optimizable placeholder (SDXL has no T5 analogue).
         return self.pipe.encode_prompt(
             prompt=prompt,
             prompt_2=prompt,
-            prompt_3=prompt,
+            prompt_3=prompt if prompt_3 is None else prompt_3,
             negative_prompt=negative_prompt,
             negative_prompt_2=negative_prompt,
             negative_prompt_3=negative_prompt,
@@ -213,36 +221,50 @@ class SD3:
 
     @torch.enable_grad()
     def prompt_opt(self, zt, t, step, placeholder_token_ids, prompt, base_embeds, popt_kwargs):
+        """Eq. 6 / latent_sdxl.py prompt_opt with the FlowMatch Tweedie analogue.
+
+        Rectified flow has x_t = (1 - sigma) x_0 + sigma * eps and v = eps - x_0,
+        so x0_hat = x_t - sigma * v.  Re-noise x0_hat to sigma_s, re-denoise it
+        under the base prompt, and maximize the two stop-gradient terms.
+        """
         decay_rate = popt_kwargs["lr_decay_rate"]
+        embeddings = [encoder.get_input_embeddings() for _, encoder in self.clip_pairs]
         optimizer = Adam(
-            self.text_encoder.get_input_embeddings().parameters(),
+            [param for emb in embeddings for param in emb.parameters()],
             lr=popt_kwargs["p_opt_lr"] * (1.0 - step * decay_rate),
         )
-        orig_embeds_params = self.text_encoder.get_input_embeddings().weight.data.clone()
+        orig_embeds_params = [emb.weight.data.clone() for emb in embeddings]
         opt_prompt = self.prompt_with_placeholder(prompt, popt_kwargs)
         base_prompt_embeds, base_pooled_prompt_embeds = base_embeds
 
+        num_train_timesteps = self.scheduler.config.num_train_timesteps
+        sigma_t = t.float() / num_train_timesteps
+        if popt_kwargs["dynamic_pr"]:
+            raise NotImplementedError("SD3 prompt optimization supports only fixed p_ratio")
+        sigma_s = torch.tensor(popt_kwargs["p_ratio"], device=zt.device)
+        t_s = sigma_s * num_train_timesteps
+
         for i in range(popt_kwargs["p_opt_iter"]):
-            prompt_embeds, _, pooled_prompt_embeds, _ = self.encode_prompt(opt_prompt)
+            prompt_embeds, _, pooled_prompt_embeds, _ = self.encode_prompt(opt_prompt, prompt_3=prompt)
             flow = self.predict_flow(zt, t, prompt_embeds, pooled_prompt_embeds)
+            z0t = zt.float() - sigma_t * flow.float()
 
-            with torch.no_grad():
-                base_flow = self.predict_flow(
-                    zt,
-                    t,
-                    base_prompt_embeds.detach(),
-                    base_pooled_prompt_embeds.detach(),
-                )
+            zs = (1.0 - sigma_s) * z0t + sigma_s * torch.randn_like(z0t)
+            flow_s = self.predict_flow(zs.to(self.dtype), t_s, base_prompt_embeds, base_pooled_prompt_embeds)
+            z0s = zs - sigma_s * flow_s.float()
 
-            loss = -1 * (flow - base_flow).reshape(flow.shape[0], -1).norm(p=2.0, dim=-1).sum()
+            term_1 = (z0t.detach() - z0s).reshape(z0t.shape[0], -1).norm(p=2.0, dim=-1)
+            term_2 = (z0t - z0s.detach()).reshape(z0t.shape[0], -1).norm(p=2.0, dim=-1)
+            loss = -1 * (term_1 + popt_kwargs["sg_lambda"] * term_2).sum()
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            self.restore_embedding(placeholder_token_ids, orig_embeds_params, self.tokenizer, self.text_encoder)
+            for (tokenizer, encoder), ids, orig in zip(self.clip_pairs, placeholder_token_ids, orig_embeds_params):
+                self.restore_embedding(ids, orig, tokenizer, encoder)
 
         with torch.no_grad():
-            prompt_embeds, _, pooled_prompt_embeds, _ = self.encode_prompt(opt_prompt)
+            prompt_embeds, _, pooled_prompt_embeds, _ = self.encode_prompt(opt_prompt, prompt_3=prompt)
         return prompt_embeds, pooled_prompt_embeds
 
     def get_timesteps(self, latents, num_inference_steps):
@@ -281,25 +303,27 @@ class BaseFlowMatch(SD3):
     ):
         null_prompt, text_prompt = prompt
 
-        prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = self.encode_prompt(
-            text_prompt,
-            negative_prompt=null_prompt,
-        )
-        base_embeds = (prompt_embeds.detach().clone(), pooled_prompt_embeds.detach().clone())
-
-        zt = self.initialize_latent(height=height, width=width, generator=generator)
-        timesteps = self.get_timesteps(zt, self.num_sampling)
-
         if popt_kwargs["prompt_opt"]:
-            self.text_encoder = self.text_encoder.to(torch.float32)
-            placeholder_token_ids = self.initialize_embedding(self.tokenizer, self.text_encoder, popt_kwargs)
+            # Add placeholders before any encoder forward: resizing the vocabulary
+            # after a grad-tracked forward leaves a stale embedding-gradient shape.
+            placeholder_token_ids = [self.initialize_embedding(tokenizer, encoder, popt_kwargs)
+                                     for tokenizer, encoder in self.clip_pairs]
             self.vae.requires_grad_(False)
             self.transformer.requires_grad_(False)
-            self.pipe.text_encoder_2.requires_grad_(False)
             if self.pipe.text_encoder_3 is not None:
                 self.pipe.text_encoder_3.requires_grad_(False)
         else:
             placeholder_token_ids = None
+
+        with torch.no_grad():
+            prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = self.encode_prompt(
+                text_prompt,
+                negative_prompt=null_prompt,
+            )
+        base_embeds = (prompt_embeds.detach().clone(), pooled_prompt_embeds.detach().clone())
+
+        zt = self.initialize_latent(height=height, width=width, generator=generator)
+        timesteps = self.get_timesteps(zt, self.num_sampling)
 
         pbar = tqdm(timesteps, desc="SD3")
         for step, t in enumerate(pbar):
